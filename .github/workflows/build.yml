@@ -20,6 +20,10 @@ on:
         description: 'AnyKernel Url (leave blank if you dont want AnyKernel)'
         default: 'https://github.com/Migu-Kernel/anykernel3-test'
         required: false
+      MODULE_TEMPLATE:
+        description: 'Module Template Url'
+        default: 'https://github.com/Migu-Kernel/kernel_modules'
+        required: false
       CUSTOM_SED:
         description: 'Custom Kernel Version'
         default: '-Migu'
@@ -147,8 +151,8 @@ jobs:
           export PATH="$(pwd)/clang/bin:$PATH"
           export ARCH=arm64
           export SUBARCH=ARM64
-          export KBUILD_BUILD_USER="renoroi"
-          export KBUILD_BUILD_HOST="dreamstate"
+          export KBUILD_BUILD_USER="nocrypt"
+          export KBUILD_BUILD_HOST="revolution"
           export KBUILD_BUILD_TIMESTAMP="$(TZ=UTC-7 date)"
           cd kernel_tree
           make O=out vendor/alioth_defconfig
@@ -184,6 +188,52 @@ jobs:
             *.img
             *-dtb
             Image.gz
+            
+      - name: Make Kernel Modules (rtl8188eus / 8812au / 8814au)
+        if: ${{ matrix.kernel == '2' && matrix.type == 'modified' }}
+        run: |
+          set -euo pipefail
+          # Toolchain + kernel paths (match your kernel build)
+          export PATH="$(pwd)/clang/bin:$PATH"
+          export ARCH=arm64
+          export SUBARCH=ARM64
+          export LLVM=1
+          export LLVM_IAS=1
+          # Kernel tree + out dir (same as your build step)
+          KERNEL_DIR="$(pwd)/kernel_tree"
+          OUT="$KERNEL_DIR/out"
+          # Sanity: make sure the kernel was built so headers/config exist
+          test -f "$OUT/.config" || { echo "ERROR: $OUT/.config not found. Build kernel first."; exit 1; }
+          # Get driver sources (shallow)
+          mkdir -p external && cd external
+          git clone --depth=1 https://github.com/aircrack-ng/rtl8188eus.git
+          git clone --depth=1 https://github.com/aircrack-ng/rtl8812au.git
+          git clone --depth=1 https://github.com/aircrack-ng/rtl8814au.git
+          # Build helper (uses kernel build system via M=<dir>)
+          build_mod () {
+            local moddir="$1"
+            echo "::group::Building $(basename "$moddir")"
+            make -C "$KERNEL_DIR" O="$OUT" M="$moddir" CC=clang LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- -j"$(nproc --all)" modules
+            echo "::endgroup::"
+          }
+          build_mod "$PWD/rtl8188eus"
+          build_mod "$PWD/rtl8812au"
+          build_mod "$PWD/rtl8814au"
+          # Strip and collect .ko to workspace root for artifact upload
+          find . -name '*.ko' -exec llvm-strip --strip-debug {} \; 2>/dev/null || true
+          find . -name '*.ko' -print -exec cp {} "$GITHUB_WORKSPACE"/ \;
+          # List results
+          cd "$GITHUB_WORKSPACE"
+          ls -lh *.ko || true
+          echo "Note: ship firmware (e.g., rtlwifi/rtl8188eufw.bin) in your Magisk/KSU module."
+
+      - name: Upload Kernel Modules Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-modules
+          path: |
+            *.ko
+        
 
   package_anykernel:
     needs: build
@@ -250,5 +300,37 @@ jobs:
           AnyKernel3/
           !AnyKernel3/.git
           !AnyKernel3/.github
+
+  package_module:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+    - name: Download Kernel Build Original (stk)
+      uses: actions/download-artifact@v4
+      with:
+        name: kernel-modules
+        path: kernel-modules
+
+    - name: Clone Template
+      run: git clone --recursive --depth=1 ${{ github.event.inputs.MODULE_TEMPLATE }} -b main Template
+
+    - name: Move All Kernel Modules into Template
+      run: |
+        mv kernel-modules/* Template/system/lib/modules/
+
+    - name: Define ZIP Name
+      run: |
+        COMPILED_DATE=$(date +%Y%m%d)
+        echo "ZIP_NAME=KSU_MODULE-MG-${{ github.event.inputs.CODENAME }}-$COMPILED_DATE" >> $GITHUB_ENV
+
+    - name: Upload Flashable Kernel Zip
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ env.ZIP_NAME }}
+        path: |
+          Template/
+          !Template/.git
+          !Template/.github
+
 
       
